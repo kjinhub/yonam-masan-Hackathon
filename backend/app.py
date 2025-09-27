@@ -5,48 +5,46 @@ import os
 import re
 import openai
 from dotenv import load_dotenv
+from flasgger import Swagger
+
+# --- 환경변수 로드 ---
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-# 환경변수에서 OpenAI API Key 불러오기
 
+# --- Google Vision Client (환경변수 기반) ---
+client = vision.ImageAnnotatorClient.from_service_account_json(
+    os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+)
+
+# --- Flask + Swagger 설정 ---
 app = Flask(__name__)
 CORS(app)
+swagger = Swagger(app)
 
-# Google Vision Client
-client = vision.ImageAnnotatorClient.from_service_account_json("gcp-key.json")
-
-# --- [수정 추가] OCR 결과 저장소 (딕셔너리) ---
+# --- OCR 결과 저장소 ---
 ocr_storage = {
     "처방전": None,
     "복약지침서": None
 }
 
+
 def extract_prescription(text):
     data = {}
-
-    # 병원명
     hospital = re.search(r"([가-힣]+병원|[가-힣]+의원)", text)
     if hospital:
         data["병원명"] = hospital.group(1)
 
-    # 성명
     name = re.search(r"(성명|환자명)[\s:]*([가-힣]{2,3})", text)
     if name:
         data["성명"] = name.group(2)
 
-    # 약별 데이터 추출
     medicines = []
     lines = text.splitlines()
     for line in lines:
-        # 약 이름
         drug_match = re.search(r"[가-힣A-Za-z]+(정|캡슐|액)\s?\d*mg?", line)
         if drug_match:
             drug_name = drug_match.group(0)
-
-            # 용법
             usage = re.findall(r"(아침|점심|저녁|취침전|식전|식후\s?\d*분)", line)
-
-            # 투약일수 (가장 큰 값만 선택)
             days = re.findall(r"(\d+)일", line)
             max_days = max([int(d) for d in days], default=None)
 
@@ -64,12 +62,10 @@ def extract_prescription(text):
 
 def extract_guideline(text):
     data = {}
-    # 약 이름
     drug = re.search(r"[가-힣A-Za-z]+(정|캡슐|액)", text)
     if drug:
         data["약이름"] = drug.group(0)
 
-    # 처방례
     usage = re.findall(r"\[처방례\]\s*([\s\S]*?)(?=\[|$)", text)
     if usage:
         try:
@@ -86,10 +82,9 @@ def extract_guideline(text):
             print("GPT Error:", e)
             data["처방례"] = " ".join(u[0] if isinstance(u, tuple) else u for u in usage)
 
-    # 주의사항 / 효능
     caution = re.findall(r"\[주의사항\]\s*([\s\S]*?)(?=\[|$)", text)
     if caution:
-        raw_caution = caution[0].strip() 
+        raw_caution = caution[0].strip()
         try:
             completion = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
@@ -112,7 +107,6 @@ def ocr():
     if "image" not in request.files:
         return jsonify({"error": "이미지 없음"}), 400
 
-    # --- OCR 처리 ---
     image = request.files["image"].read()
     vision_image = vision.Image(content=image)
     response = client.text_detection(image=vision_image)
@@ -123,7 +117,6 @@ def ocr():
 
     raw_text = texts[0].description.strip()
 
-    # --- GPT 보정 ---
     try:
         completion = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -135,9 +128,8 @@ def ocr():
         refined_text = completion.choices[0].message["content"].strip()
     except Exception as e:
         print("GPT Error:", e)
-        refined_text = raw_text  # 오류 시 원본 사용
+        refined_text = raw_text
 
-    # --- 문서 분류 (GPT + refined_text 사용) ---
     try:
         completion = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -149,13 +141,11 @@ def ocr():
         doc_type = completion.choices[0].message["content"].strip()
     except Exception as e:
         print("GPT Error:", e)
-        # GPT 오류 시 fallback: 키워드 기반
         if "병원" in refined_text or "투약일수" in refined_text or "성명" in refined_text:
             doc_type = "처방전"
         else:
             doc_type = "복약지침서"
 
-    # --- 문서별 처리 ---
     if doc_type == "처방전":
         result = extract_prescription(refined_text)
         result["type"] = "처방전"
@@ -168,8 +158,6 @@ def ocr():
     return jsonify(result)
 
 
-
-# --- [수정 추가] 저장된 결과 전체 불러오기 ---
 @app.route("/ocr-results", methods=["GET"])
 def get_results():
     return jsonify(ocr_storage)

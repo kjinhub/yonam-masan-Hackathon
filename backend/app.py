@@ -28,6 +28,7 @@ ocr_storage = {
 }
 
 
+
 def extract_prescription(text):
     data = {}
     hospital = re.search(r"([가-힣]+병원|[가-힣]+의원)", text)
@@ -48,10 +49,26 @@ def extract_prescription(text):
             days = re.findall(r"(\d+)일", line)
             max_days = max([int(d) for d in days], default=None)
 
+            summarized_usage = None
+            if usage:
+                try:
+                    completion = openai.ChatCompletion.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "너는 약 복용 지침을 고령층이 이해하기 쉽게 요약하는 보조기다."},
+                            {"role": "user", "content": f"복용 지침: {', '.join(usage)}\n\n이 문장을 간단하게 요약해줘."}
+                        ]
+                    )
+                    summarized_usage = completion.choices[0].message["content"].strip()
+                except Exception as e:
+                    print("GPT Error:", e)
+                    summarized_usage = " ".join(u[0] if isinstance(u, tuple) else u for u in usage)
+
             medicines.append({
                 "약이름": drug_name,
                 "용법": usage,
-                "투약일수": str(max_days) + "일" if max_days else None
+                "투약일수": str(max_days) + "일" if max_days else None,
+                "요약된용법": summarized_usage
             })
 
     if medicines:
@@ -104,6 +121,58 @@ def extract_guideline(text):
 
 @app.route("/ocr", methods=["POST"])
 def ocr():
+    """
+    이미지 OCR → 처방전/복약지침서 분류 및 정보 추출
+    ---
+    consumes:
+      - multipart/form-data
+    parameters:
+      - name: image
+        in: formData
+        type: file
+        required: true
+        description: 업로드할 이미지 파일 (처방전 또는 복약지침서)
+    responses:
+      200:
+        description: OCR 및 문서 분류 결과
+        schema:
+          type: object
+          properties:
+            type:
+              type: string
+              example: "처방전"
+            병원명:
+              type: string
+              example: "서울병원"
+            성명:
+              type: string
+              example: "홍길동"
+            약목록:
+              type: array
+              items:
+                type: object
+                properties:
+                  약이름:
+                    type: string
+                    example: "타이레놀정500mg"
+                  용법:
+                    type: array
+                    items:
+                      type: string
+                    example: ["아침", "저녁", "식후30분"]
+                  투약일수:
+                    type: string
+                    example: "5일"
+            약이름:
+              type: string
+              example: "로사르탄정"
+            처방례:
+              type: string
+              example: "아침에 1정 복용"
+            주의사항:
+              type: string
+              example: "혈압약, 어지러움 발생 가능"
+    """
     if "image" not in request.files:
         return jsonify({"error": "이미지 없음"}), 400
 
@@ -160,6 +229,22 @@ def ocr():
 
 @app.route("/ocr-results", methods=["GET"])
 def get_results():
+    """
+    저장된 OCR 결과 전체 조회
+    ---
+    responses:
+      200:
+        description: 지금까지 업로드한 OCR 결과 반환
+        schema:
+          type: object
+          properties:
+            처방전:
+              type: object
+              example: {"type": "처방전", "병원명": "서울병원", "성명": "홍길동"}
+            복약지침서:
+              type: object
+              example: {"type": "복약지침서", "약이름": "로사르탄정", "처방례": "아침에 1정"}
+    """
     return jsonify(ocr_storage)
 
 
